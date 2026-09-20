@@ -2054,8 +2054,13 @@ class Database:
         instead of the subscription being wedged in 'half_open' forever.
 
         Repeated cancellation is idempotent: the second call finds no
-        'pending' rows, cancels zero, and reports the same totals. Returns
-        None when the event does not exist.
+        'pending' rows, cancels zero, and reports the same totals. The
+        returned 'cancelled_at' is derived from the persisted task rows --
+        the most recent actual cancellation time of the event's cancelled
+        tasks -- so a repeat call that cancels nothing reports the original
+        cancellation time instead of the call time, and an event that never
+        cancelled any task reports None. Returns None when the event does
+        not exist.
         """
         now = time.time()
         with self._lock, self._immediate():
@@ -2104,9 +2109,20 @@ class Database:
             for r in rows:
                 counts[r["status"]] = r["n"]
 
+            # Event-level cancellation time comes from the persisted task
+            # rows (the most recent actual cancellation), never from the
+            # call clock: a repeat call that cancels nothing must report
+            # the original time, and an event that never cancelled a task
+            # reports NULL -- matching what GET /events/{id} derives.
+            last_cancelled_at = self._conn.execute(
+                """SELECT MAX(cancelled_at) AS ts FROM tasks
+                    WHERE event_id = ? AND status = 'cancelled'""",
+                (event_id,),
+            ).fetchone()["ts"]
+
         return {
             "event_id": event_id,
             "cancelled": newly_cancelled,
-            "cancelled_at": now,
+            "cancelled_at": last_cancelled_at,
             "counts": counts,
         }

@@ -277,12 +277,16 @@ class EventCancelResult(BaseModel):
     'cancelled' is the number of tasks moved to 'cancelled' by this call
     (0 on a repeated, idempotent call); 'counts' reports the resulting
     per-status totals, so callers can see how many tasks were already in
-    flight or finished at cancel time.
+    flight or finished at cancel time. 'cancelled_at' is the most recent
+    actual cancellation time persisted on the event's tasks -- identical
+    to what GET /events/{id} reports -- so a repeat call that cancelled
+    nothing returns the original time, and it is null when the event has
+    never cancelled any task.
     """
 
     event_id: str
     cancelled: int
-    cancelled_at: str
+    cancelled_at: str | None
     counts: EventStatusCounts
 
 

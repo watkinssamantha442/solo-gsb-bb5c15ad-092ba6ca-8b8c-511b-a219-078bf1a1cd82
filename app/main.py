@@ -637,7 +637,10 @@ def cancel_event(event_id: str) -> dict:
     result. Cancelled tasks are terminal: they are never retried, never
     counted by the per-subscription circuit breaker, and never block later
     tasks of the same subscription. Repeating the call is a no-op that
-    returns the same per-status totals; an unknown event returns 404.
+    returns the same per-status totals; the response 'cancelled_at' is the
+    most recent actual cancellation time persisted on the event's tasks
+    (null when the event never cancelled any task), exactly as reported by
+    GET /events/{id}. An unknown event returns 404.
     """
     result = app.state.db.cancel_event(event_id)
     if result is None:
