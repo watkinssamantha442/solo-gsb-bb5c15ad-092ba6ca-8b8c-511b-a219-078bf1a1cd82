@@ -2054,8 +2054,16 @@ class Database:
         instead of the subscription being wedged in 'half_open' forever.
 
         Repeated cancellation is idempotent: the second call finds no
-        'pending' rows, cancels zero, and reports the same totals. Returns
-        None when the event does not exist.
+        'pending' rows, cancels zero, and reports the same totals. The
+        event-level cancelled_at is derived, never stamped on read: it is
+        MAX(tasks.cancelled_at) over the event's cancelled rows, i.e. the
+        time of the most recent call that *actually* cancelled at least one
+        task. A repeat call that cancels nothing therefore returns the exact
+        timestamp an earlier call persisted (it is not refreshed to the
+        current wall clock), and an event every call found with no pending
+        tasks -- all of its tasks already in flight or terminal -- returns
+        NULL even though the call itself succeeded. Returns None when the
+        event does not exist.
         """
         now = time.time()
         with self._lock, self._immediate():
@@ -2065,6 +2073,11 @@ class Database:
             if exists is None:
                 return None
 
+            # One UPDATE for every pending row of the event: all tasks this
+            # call cancels share one identical timestamp, and tasks already
+            # 'in_progress' or in a terminal state are outside the WHERE
+            # clause, so neither their status, updated_at nor cancelled_at
+            # can ever be rewritten by a (repeat) cancel.
             cur = self._conn.execute(
                 """UPDATE tasks
                        SET status = 'cancelled', next_attempt_at = NULL,
@@ -2077,7 +2090,9 @@ class Database:
             if newly_cancelled:
                 # Release any half-open breaker whose unique probe was just
                 # cancelled; the next claim promotes the earliest remaining
-                # pending task to a fresh, immediately-due probe.
+                # pending task to a fresh, immediately-due probe. The repair
+                # is gated on newly_cancelled so a repeat no-op call can
+                # never touch breaker state.
                 self._conn.execute(
                     """UPDATE subscriptions
                           SET breaker_state = 'open', breaker_next_probe_at = ?,
@@ -2104,9 +2119,22 @@ class Database:
             for r in rows:
                 counts[r["status"]] = r["n"]
 
+            # Derive the event-level cancellation time from the persisted
+            # cancelled rows (same source GET /events/{id} uses). MAX ignores
+            # NULLs, so a drifted row that is merely flagged 'cancelled'
+            # without a timestamp cannot fabricate one; over an event with no
+            # cancelled rows the aggregate comes back NULL.
+            last_row = self._conn.execute(
+                """SELECT MAX(cancelled_at) AS last_cancelled_at
+                     FROM tasks
+                    WHERE event_id = ? AND status = 'cancelled'""",
+                (event_id,),
+            ).fetchone()
+            last_cancelled_at = last_row["last_cancelled_at"] if last_row else None
+
         return {
             "event_id": event_id,
             "cancelled": newly_cancelled,
-            "cancelled_at": now,
+            "cancelled_at": last_cancelled_at,
             "counts": counts,
         }
